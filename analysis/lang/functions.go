@@ -39,6 +39,25 @@ func IterateInstructions(function *ssa.Function, f func(index int, instruction s
 	}
 }
 
+// IterateInstructionsFallible is identical to IterateInstructions but returns
+// an error the first time f returns an error.
+func IterateInstructionsFallible(function *ssa.Function, f func(index int, instruction ssa.Instruction) error) error {
+	// If this is an external function, return.
+	if function.Blocks == nil {
+		return nil
+	}
+
+	for _, block := range function.Blocks {
+		for index, instruction := range block.Instrs {
+			if err := f(index, instruction); err != nil {
+				return err
+			}
+		}
+	}
+
+	return nil
+}
+
 // IterateValues applies f to every value in the function. It might apply f several times to the same value
 // if the value is from an instruction, the index of the instruction in the block will be provided, otherwise a value
 // of -1 indicating the value is not in an instruction is given to the function.

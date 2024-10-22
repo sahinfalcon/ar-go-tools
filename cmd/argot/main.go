@@ -29,6 +29,7 @@ import (
 	"github.com/awslabs/ar-go-tools/cmd/argot/reachability"
 	"github.com/awslabs/ar-go-tools/cmd/argot/render"
 	"github.com/awslabs/ar-go-tools/cmd/argot/statistics"
+	"github.com/awslabs/ar-go-tools/cmd/argot/syntactic"
 	"github.com/awslabs/ar-go-tools/cmd/argot/taint"
 	"github.com/awslabs/ar-go-tools/cmd/argot/tools"
 )
@@ -147,6 +148,14 @@ func main() {
 			errExit(err)
 		}
 		if err := statistics.Run(flags); err != nil {
+			errExit(err)
+		}
+	case "syntactic":
+		flags, err := tools.NewCommonFlags("syntactic", args, syntactic.Usage)
+		if err != nil {
+			errExit(err)
+		}
+		if err := syntactic.Run(flags); err != nil {
 			errExit(err)
 		}
 	case "taint":

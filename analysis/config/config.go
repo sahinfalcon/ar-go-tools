@@ -132,6 +132,8 @@ type Config struct {
 
 	// StaticCommandsProblems lists the static commands problems
 	StaticCommandsProblems []StaticCommandsSpec `yaml:"static-commands-problems" json:"static-commands-problems"`
+
+	SyntacticProblems []SyntacticSpecs `yaml:"syntactic-problems" json:"syntactic-problems"`
 }
 
 // PointerConfig is the pointer analysis specific configuration.
@@ -196,6 +198,30 @@ type StaticCommandsSpec struct {
 	// StaticCommands is the list of identifiers to be considered as command execution for the static commands analysis
 	// (not used)
 	StaticCommands []CodeIdentifier `yaml:"static-commands" json:"static-commands"`
+}
+
+// SyntacticSpecs contains specs for the different syntactic analysis problems.
+type SyntacticSpecs struct {
+	// StructInitSpecs is the list of specs for the struct inititialization problems.
+	StructInitProblems []StructInitSpec `yaml:"struct-inits" json:"struct-inits"`
+}
+
+// StructInitSpec contains specs for the problem of tracking a specific struct initialization.
+type StructInitSpec struct {
+	// Struct is the struct type whose initialization should be tracked.
+	Struct CodeIdentifier
+	// FieldsSet represents the fields of Struct that must always be set to a specific value.
+	FieldsSet []FieldsSetSpec `yaml:"fields-set" json:"fields-set"`
+}
+
+// FieldsSetSpec contains the code identifiers for the problem of tracking how a
+// struct's fields are initialized.
+type FieldsSetSpec struct {
+	// Field is the struct field name whose value must be initialized to the Value.
+	Field string
+	// Value is the value that Field must always be set to.
+	// We only support static values for now (e.g., constants and static functions).
+	Value CodeIdentifier
 }
 
 // Options holds the global options for analyses
@@ -458,6 +484,15 @@ func Load(filename string, configBytes []byte) (*Config, error) {
 
 	for _, stSpec := range cfg.StaticCommandsProblems {
 		funcutil.MapInPlace(stSpec.StaticCommands, compileRegexes)
+	}
+
+	for _, spec := range cfg.SyntacticProblems {
+		for i, siSpec := range spec.StructInitProblems {
+			spec.StructInitProblems[i].Struct = compileRegexes(siSpec.Struct)
+			for j, fSpec := range siSpec.FieldsSet {
+				siSpec.FieldsSet[j].Value = compileRegexes(fSpec.Value)
+			}
+		}
 	}
 
 	if cfg.PointerConfig == nil {

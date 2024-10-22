@@ -406,6 +406,10 @@ func (s *AnalyzerState) PopulateBoundingInformation(verbose bool) error {
 // To compute reachable functions without main or init, use the CallGraphReachable function with
 // the appropriate callgraph information.
 func (s *AnalyzerState) ReachableFunctions() map[*ssa.Function]bool {
+	if len(s.reachableFunctions) > 0 {
+		return s.reachableFunctions
+	}
+
 	// Create reachability information using best available callgraph
 	if s.reachableFunctions == nil {
 		s.reachableFunctions = make(map[*ssa.Function]bool)

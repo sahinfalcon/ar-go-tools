@@ -42,37 +42,37 @@ func checkNotEqualOnNonEmptyFields(t *testing.T, cid1 CodeIdentifier, cid2 CodeI
 }
 
 func TestCodeIdentifier_equalOnNonEmptyFields_selfEquals(t *testing.T) {
-	cid1 := CodeIdentifier{"", "a", "", "b", "", "", "", "", "", "", nil}
+	cid1 := CodeIdentifier{"", "a", "", "b", "", "", "", "", "", "", "", nil}
 	checkEqualOnNonEmptyFields(t, cid1, cid1)
 }
 
 func TestCodeIdentifier_equalOnNonEmptyFields_emptyMatchesAny(t *testing.T) {
-	cid1 := CodeIdentifier{"", "a", "b", "i", "c", "d", "e", "", "", "", nil}
-	cid2 := CodeIdentifier{"", "de", "234jbn", "ef", "23kjb", "d", "234", "", "", "", nil}
+	cid1 := CodeIdentifier{"", "a", "b", "i", "c", "d", "e", "", "", "", "", nil}
+	cid2 := CodeIdentifier{"", "de", "234jbn", "ef", "23kjb", "d", "234", "", "", "", "", nil}
 	cidEmpty := CodeIdentifier{}
 	checkEqualOnNonEmptyFields(t, cid1, cidEmpty)
 	checkEqualOnNonEmptyFields(t, cid2, cidEmpty)
 }
 
 func TestCodeIdentifier_equalOnNonEmptyFields_oneDiff(t *testing.T) {
-	cid1 := CodeIdentifier{"", "a", "b", "", "", "", "", "", "", "", nil}
-	cid2 := CodeIdentifier{"", "a", "", "", "", "", "", "", "", "", nil}
+	cid1 := CodeIdentifier{"", "a", "b", "", "", "", "", "", "", "", "", nil}
+	cid2 := CodeIdentifier{"", "a", "", "", "", "", "", "", "", "", "", nil}
 	checkEqualOnNonEmptyFields(t, cid1, cid2)
 	checkNotEqualOnNonEmptyFields(t, cid2, cid1)
 }
 
 func TestCodeIdentifier_equalOnNonEmptyFields_regexes(t *testing.T) {
-	cid1 := CodeIdentifier{"", "main", "b", "", "", "", "", "", "", "", nil}
-	cid1bis := CodeIdentifier{"", "command-line-arguments", "b", "", "", "", "", "", "", "", nil}
-	cid2 := CodeIdentifier{"", "(main)|(command-line-arguments)$", "", "", "", "", "", "", "", "", nil}
+	cid1 := CodeIdentifier{"", "main", "b", "", "", "", "", "", "", "", "", nil}
+	cid1bis := CodeIdentifier{"", "command-line-arguments", "b", "", "", "", "", "", "", "", "", nil}
+	cid2 := CodeIdentifier{"", "(main)|(command-line-arguments)$", "", "", "", "", "", "", "", "", "", nil}
 	checkEqualOnNonEmptyFields(t, cid1, cid2)
 	checkEqualOnNonEmptyFields(t, cid1bis, cid2)
 }
 
 func TestCodeIdentifier_equalOnNonEmptyFields_regexes_withContexts(t *testing.T) {
-	cid1 := CodeIdentifier{"main-package", "main", "", "b", "", "", "", "", "", "", nil}
-	cid1bis := CodeIdentifier{"main", "command-line-arguments", "", "b", "", "", "", "", "", "", nil}
-	cid2 := CodeIdentifier{"mai.*", "(main)|(command-line-arguments)$", "", "", "", "", "", "", "", "", nil}
+	cid1 := CodeIdentifier{"main-package", "main", "", "b", "", "", "", "", "", "", "", nil}
+	cid1bis := CodeIdentifier{"main", "command-line-arguments", "", "b", "", "", "", "", "", "", "", nil}
+	cid2 := CodeIdentifier{"mai.*", "(main)|(command-line-arguments)$", "", "", "", "", "", "", "", "", "", nil}
 	checkEqualOnNonEmptyFields(t, cid1, cid2)
 	checkEqualOnNonEmptyFields(t, cid1bis, cid2)
 }
@@ -196,6 +196,55 @@ func TestLoadWithNoSpecifiedReportsDir(t *testing.T) {
 	os.Remove(config.ReportsDir)
 }
 
+func TestLoadSyntacticConfigYaml(t *testing.T) {
+	fileName, config, err := loadFromTestDir("syntactic-config.yaml")
+	if config == nil || err != nil {
+		t.Errorf("could not load %s", fileName)
+		return
+	}
+	if config.ReportsDir == "" {
+		t.Errorf("expected reports-dir to be non-empty after loading config %q", fileName)
+	}
+	if config.LogLevel != int(TraceLevel) {
+		t.Error("syntactic config should have set trace log level")
+	}
+	if config.MaxAlarms != 2 {
+		t.Error("syntactic config should have set 2 max alarms")
+	}
+	if !config.SilenceWarn {
+		t.Error("syntactic config should have set silence-warn to true")
+	}
+
+	if len(config.SyntacticProblems) == 0 {
+		t.Error("syntactic config should have syntactic problems")
+	}
+	for _, spec := range config.SyntacticProblems {
+		if len(spec.StructInitProblems) == 0 {
+			t.Error("syntactic config should have struct-init problems")
+		}
+		for _, sspec := range spec.StructInitProblems {
+			if sspec.Struct.Type == "" {
+				t.Error("syntactic config should have a struct-init struct type")
+			}
+			if len(sspec.FieldsSet) == 0 {
+				t.Error("syntactic config should have a struct-init fields-set list")
+			}
+			for _, fspec := range sspec.FieldsSet {
+				if fspec.Field == "" {
+					t.Error("syntactic config should have a struct-init fields-set field")
+				}
+				if fspec.Value.Package == "" {
+					t.Error("syntactic config should have a struct-init fields-set value package")
+				}
+				if fspec.Value.Const == "" {
+					t.Error("syntactic config should have a struct-init fields-set value const")
+				}
+			}
+		}
+	}
+	os.Remove(config.ReportsDir)
+}
+
 //gocyclo:ignore
 func TestLoadFullConfigYaml(t *testing.T) {
 	fileName, config, err := loadFromTestDir("full-config.yaml")
@@ -293,8 +342,8 @@ func TestLoadMisc(t *testing.T) {
 		t,
 		"config.yaml",
 		mkConfig(
-			[]CodeIdentifier{{"", "a", "", "b", "", "", "", "", "", "", nil}},
-			[]CodeIdentifier{{"", "c", "", "d", "", "", "", "", "", "", nil}},
+			[]CodeIdentifier{{"", "a", "", "b", "", "", "", "", "", "", "", nil}},
+			[]CodeIdentifier{{"", "c", "", "d", "", "", "", "", "", "", "", nil}},
 			[]CodeIdentifier{},
 		),
 	)
@@ -302,20 +351,20 @@ func TestLoadMisc(t *testing.T) {
 	testLoadOneFile(t,
 		"config2.json",
 		mkConfig(
-			[]CodeIdentifier{{"", "x", "", "a", "", "b", "", "", "", "", nil}},
-			[]CodeIdentifier{{"", "y", "", "b", "", "", "", "", "", "", nil}},
-			[]CodeIdentifier{{"", "p", "", "a", "", "", "", "", "", "", nil},
-				{"", "p2", "", "a", "", "", "", "", "", "", nil}},
+			[]CodeIdentifier{{"", "x", "", "a", "", "b", "", "", "", "", "", nil}},
+			[]CodeIdentifier{{"", "y", "", "b", "", "", "", "", "", "", "", nil}},
+			[]CodeIdentifier{{"", "p", "", "a", "", "", "", "", "", "", "", nil},
+				{"", "p2", "", "a", "", "", "", "", "", "", "", nil}},
 		),
 	)
 	//
 	testLoadOneFile(t,
 		"config2.yaml",
 		mkConfig(
-			[]CodeIdentifier{{"", "x", "", "a", "", "b", "", "", "", "", nil}},
-			[]CodeIdentifier{{"", "y", "", "b", "", "", "", "", "", "", nil}},
-			[]CodeIdentifier{{"", "p", "", "a", "", "", "", "", "", "", nil},
-				{"", "p2", "", "a", "", "", "", "", "", "", nil}},
+			[]CodeIdentifier{{"", "x", "", "a", "", "b", "", "", "", "", "", nil}},
+			[]CodeIdentifier{{"", "y", "", "b", "", "", "", "", "", "", "", nil}},
+			[]CodeIdentifier{{"", "p", "", "a", "", "", "", "", "", "", "", nil},
+				{"", "p2", "", "a", "", "", "", "", "", "", "", nil}},
 		),
 	)
 	//
@@ -324,14 +373,14 @@ func TestLoadMisc(t *testing.T) {
 		Config{
 			TaintTrackingProblems: []TaintSpec{
 				{
-					Sanitizers: []CodeIdentifier{{"", "pkg1", "", "Foo", "Obj", "", "", "", "", "", nil}},
-					Sinks: []CodeIdentifier{{"", "y", "", "b", "", "", "", "", "", "", nil},
-						{"", "x", "", "", "Obj1", "", "", "", "", "", nil}},
+					Sanitizers: []CodeIdentifier{{"", "pkg1", "", "Foo", "Obj", "", "", "", "", "", "", nil}},
+					Sinks: []CodeIdentifier{{"", "y", "", "b", "", "", "", "", "", "", "", nil},
+						{"", "x", "", "", "Obj1", "", "", "", "", "", "", nil}},
 					Sources: []CodeIdentifier{
-						{"", "some/package", "", "SuperMethod", "", "", "", "", "", "", nil},
+						{"", "some/package", "", "SuperMethod", "", "", "", "", "", "", "", nil},
 
-						{"", "some/other/package", "", "", "", "OneField", "ThatStruct", "", "", "", nil},
-						{"", "some/other/package", "Interface", "", "", "", "", "", "", "", nil},
+						{"", "some/other/package", "", "", "", "OneField", "ThatStruct", "", "", "", "", nil},
+						{"", "some/other/package", "Interface", "", "", "", "", "", "", "", "", nil},
 					},
 					FailOnImplicitFlow: false,
 				},
@@ -347,7 +396,7 @@ func TestLoadMisc(t *testing.T) {
 		},
 	)
 	// Test configuration file for static-commands
-	osExecCid := CodeIdentifier{"", "os/exec", "", "Command", "", "", "", "", "", "", nil}
+	osExecCid := CodeIdentifier{"", "os/exec", "", "Command", "", "", "", "", "", "", "", nil}
 	cfg := NewDefault()
 	cfg.StaticCommandsProblems = []StaticCommandsSpec{{[]CodeIdentifier{osExecCid}}}
 	testLoadOneFile(t, "config-find-osexec.yaml", *cfg)
