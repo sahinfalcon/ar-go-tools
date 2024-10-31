@@ -38,8 +38,10 @@ const One = 1
 func testZeroAlloc() {
 	var ex1 target
 	fmt.Println(ex1) // @ZeroAlloc(target)
+
 	ex2 := &target{} // @ZeroAlloc(target)
 	fmt.Println(ex2)
+
 	ex3 := &target{} // ok because of write
 	ex3.x = 1
 	fmt.Println(ex3)
@@ -58,32 +60,70 @@ func testZeroAlloc() {
 
 	ex8 := nested{}
 	fmt.Println(ex8) // @ZeroAlloc(nested)
+
+	ex9 := struct{ x int }(target{}) // @ZeroAlloc(target)
+	fmt.Println(ex9)
+
+	ex10 := target(struct{ x int }{}) // @ZeroAlloc(target)
+	fmt.Println(ex10)
 }
 
 func testUntypedConstAlloc() {
 	ex1 := target{x: 1} // ok
 	fmt.Println(ex1)
+
 	ex2 := target{x: -1} // @InvalidWrite(target)
 	fmt.Println(ex2)
+
 	ex3 := &target{x: -1} // @InvalidWrite(target)
 	fmt.Println(ex3)
+
 	ex4 := nested{t: target{x: 1}} // ok
 	fmt.Println(ex4)
+
 	ex5 := nestedPtr{t: &target{x: 1}} // ok
 	fmt.Println(ex5)
+
 	ex6 := nested{t: target{x: -1}} // @InvalidWrite(target)
 	fmt.Println(ex6)
+
 	ex7 := nestedPtr{t: &target{x: -1}} // @InvalidWrite(target)
 	fmt.Println(ex7)
+
+	ex8 := struct{ x int }(target{x: -1}) // @InvalidWrite(target) // @ZeroAlloc(target) // TODO zero-alloc false positive
+	fmt.Println(ex8)
+
+	ex9 := target(struct{ x int }{x: -1}) // @InvalidWrite(target) // @ZeroAlloc(target) // TODO zero-alloc false positive
+	fmt.Println(ex9)
 }
 
 func testTypedConstAlloc() {
 	ex1 := target{x: One} // ok
 	fmt.Println(ex1)
+
 	ex2 := target{x: -One} // @InvalidWrite(target)
 	fmt.Println(ex2)
+
 	ex3 := &target{x: -One} // @InvalidWrite(target)
 	fmt.Println(ex3)
+
+	ex4 := nested{t: target{x: One}} // ok
+	fmt.Println(ex4)
+
+	ex5 := nestedPtr{t: &target{x: One}} // ok
+	fmt.Println(ex5)
+
+	ex6 := nested{t: target{x: -One}} // @InvalidWrite(target)
+	fmt.Println(ex6)
+
+	ex7 := nestedPtr{t: &target{x: -One}} // @InvalidWrite(target)
+	fmt.Println(ex7)
+
+	ex8 := struct{ x int }(target{x: -One}) // @InvalidWrite(target) // @ZeroAlloc(target) // TODO zero-alloc false positive
+	fmt.Println(ex8)
+
+	ex9 := target(struct{ x int }{x: -One}) // @InvalidWrite(target)// @ZeroAlloc(target) // TODO zero-alloc false positive
+	fmt.Println(ex9)
 }
 
 func main() {

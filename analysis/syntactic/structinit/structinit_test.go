@@ -199,7 +199,7 @@ func checkInvalidWrites(t *testing.T, res structinit.AnalysisResult, want map[st
 func setupConfig(cfg *config.Config) {
 	cfg.Options.ReportCoverage = false
 	cfg.Options.ReportsDir = ""
-	cfg.LogLevel = int(config.ErrLevel) // change this as needed for debugging
+	cfg.LogLevel = int(config.DebugLevel) // change this as needed for debugging
 }
 
 // zeroAllocRegex matches annotations of the form "@ZeroAlloc(id1, id2, id3)"

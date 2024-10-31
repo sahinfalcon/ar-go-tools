@@ -90,27 +90,30 @@ func Analyze(cfg *config.Config, prog *ssa.Program, pkgs []*packages.Package) (A
 	res := AnalysisResult{InitInfos: make(map[*types.Named]InitInfo)}
 	specs := structInitSpecs(cfg)
 
-	allocs := allStructAllocs(fns, specs)
+	allocs, structToNamed := allStructAllocs(fns, specs)
 	infos, err := initInfos(state, allocs, specs)
 	res.InitInfos = infos
 	if err != nil {
 		return res, err
 	}
-	logger.Debugf("initInfos: %+v\n", res.InitInfos)
-	for _, info := range res.InitInfos {
-		logger.Debugf("fieldToConst:\n")
-		for f, c := range info.fieldToConst {
-			logger.Debugf("\t%v -> %v\n", f, c)
-		}
-	}
+	debug(logger, res, structToNamed)
 
 	for _, alloc := range allocs {
 		if isConfiguredZeroAlloc(res, alloc) {
 			pos := findAllocPosition(program.Fset, alloc.instr)
 			logger.Infof("found zero alloc: %v at %v\n", alloc.instr, pos)
-			is := res.InitInfos[alloc.typs.named]
+			named := alloc.typs.named
+			if named == nil {
+				n, ok := findNamedStruct(alloc.typs.strct, structToNamed)
+				if !ok {
+					panic(fmt.Sprintf("struct %v has no named type", alloc.typs.strct))
+				}
+				named = n
+			}
+
+			is := res.InitInfos[named]
 			is.ZeroAllocs = append(is.ZeroAllocs, ZeroAlloc{Alloc: alloc.instr, Pos: pos})
-			res.InitInfos[alloc.typs.named] = is
+			res.InitInfos[named] = is
 		}
 	}
 
@@ -126,9 +129,10 @@ func Analyze(cfg *config.Config, prog *ssa.Program, pkgs []*packages.Package) (A
 			switch instr := instr.(type) {
 			case *ssa.Store:
 				pos := program.Fset.Position(instr.Pos())
-				if write, ok := isInvalidWrite(res, instr, pos); ok {
+				if write, ok := isInvalidWrite(res, structToNamed, instr, pos); ok {
 					namedType := write.structTypes.named
-					logger.Infof("found invalid write of value %v (wanted %v) to struct field %v.%v at %v\n", write.write.Got, write.write.Want, namedType, write.fieldType.Name(), pos)
+					logger.Infof("found invalid write of value %v (wanted %v) to struct field %v.%v at %v\n",
+						write.write.Got, write.write.Want, namedType, write.fieldType.Name(), pos)
 					writes := res.InitInfos[namedType].InvalidWrites[write.fieldType]
 					res.InitInfos[namedType].InvalidWrites[write.fieldType] = append(writes, write.write)
 				}
@@ -137,6 +141,20 @@ func Analyze(cfg *config.Config, prog *ssa.Program, pkgs []*packages.Package) (A
 	}
 
 	return res, nil
+}
+
+func debug(logger *config.LogGroup, res AnalysisResult, structToNamed map[*types.Struct]*types.Named) {
+	logger.Debugf("initInfos: %+v\n", res.InitInfos)
+	for _, info := range res.InitInfos {
+		logger.Debugf("fieldToConst:\n")
+		for f, c := range info.fieldToConst {
+			logger.Debugf("\t%v -> %v\n", f, c)
+		}
+	}
+	logger.Debugf("structToNamed:\n")
+	for s, n := range structToNamed {
+		logger.Debugf("\t%v -> %v\n", s, n)
+	}
 }
 
 func structInitSpecs(cfg *config.Config) []config.StructInitSpec {
@@ -151,7 +169,7 @@ func structInitSpecs(cfg *config.Config) []config.StructInitSpec {
 }
 
 func initInfos(state *dataflow.AnalyzerState, allocs []alloced, specs []config.StructInitSpec) (map[*types.Named]InitInfo, error) {
-	res := make(map[*types.Named]InitInfo)
+	infos := make(map[*types.Named]InitInfo)
 	initialized := make(map[config.CodeIdentifier]bool)
 
 	for _, alloc := range allocs {
@@ -160,32 +178,35 @@ func initInfos(state *dataflow.AnalyzerState, allocs []alloced, specs []config.S
 				continue
 			}
 
-			structTypes, ok := isStructType(alloc.val.Type())
+			structTyps, ok := isStructType(alloc.val.Type())
 			if !ok {
 				continue
 			}
 
-			structType := structTypes.strct
+			structType := structTyps.strct
+			if structTyps.named == nil {
+				continue
+			}
 			// match the name of the struct, not the struct type itself
-			if !spec.Struct.MatchType(structTypes.named) {
+			if !spec.Struct.MatchType(structTyps.named) {
 				continue
 			}
 
-			if _, ok := res[structTypes.named]; ok {
-				return res, fmt.Errorf("InitInfo for struct %v should have already been initialized", structTypes.named)
+			if _, ok := infos[structTyps.named]; ok {
+				return infos, fmt.Errorf("InitInfo for struct %v should have already been initialized", structTyps.named)
 			}
 
 			info, err := newInitInfo(spec, structType, state)
 			if err != nil {
-				return res, fmt.Errorf("failed to create InitInfo: %v", err)
+				return infos, fmt.Errorf("failed to create InitInfo: %v", err)
 			}
 
-			res[structTypes.named] = info
+			infos[structTyps.named] = info
 			initialized[spec.Struct] = true
 		}
 	}
 
-	return res, nil
+	return infos, nil
 }
 
 func newInitInfo(spec config.StructInitSpec, structType *types.Struct, state *dataflow.AnalyzerState) (InitInfo, error) {
@@ -228,17 +249,24 @@ func newInitInfo(spec config.StructInitSpec, structType *types.Struct, state *da
 // potential zero-allocation of a struct in res.InitInfos.
 func isConfiguredZeroAlloc(res AnalysisResult, alloc alloced) bool {
 	for structNamed := range res.InitInfos {
-		if matchStructType(alloc.typs.named, structNamed) {
-			switch instr := alloc.instr.(type) {
-			case *ssa.Alloc:
-				if isZeroAlloc(instr) {
+		switch instr := alloc.instr.(type) {
+		case *ssa.Alloc:
+			if alloc.typs.named != nil && matchNamedStructType(alloc.typs.named, structNamed) {
+				if isZeroAlloc(instr, alloc.instr.Block().Instrs) {
 					return true
 				}
-			case *ssa.MakeInterface:
-				// TODO confirm:
-				// struct converted to an interface will either have been
-				// explicitly allocated previously or is initialized to the zero
-				// value in the instruction itself
+			}
+		case *ssa.ChangeType:
+			if matchStructType(alloc.typs.strct, structNamed.Underlying().(*types.Struct)) {
+				// TODO this is safe but imprecise
+				return true
+			}
+		case *ssa.MakeInterface:
+			// TODO confirm:
+			// struct converted to an interface will either have been
+			// explicitly allocated previously or is initialized to the zero
+			// value in the instruction itself
+			if alloc.typs.named != nil && matchNamedStructType(alloc.typs.named, structNamed) {
 				return true
 			}
 		}
@@ -252,17 +280,19 @@ func isConfiguredZeroAlloc(res AnalysisResult, alloc alloced) bool {
 // block.
 // This means that isZeroAlloc underapproximates zero-allocations because it
 // does not analyze all writes in the program.
-func isZeroAlloc(alloc *ssa.Alloc) bool {
-	fieldAddrs := fieldAddrsOfAlloc(alloc)
-	instrs := alloc.Block().Instrs
-
+func isZeroAlloc(alloc ssa.Value, instrs []ssa.Instruction) bool {
+	fieldAddrs := fieldAddrsOfAlloc(alloc, instrs)
 	for _, instr := range instrs {
-		if store, ok := instr.(*ssa.Store); ok {
-			if addr, ok := store.Addr.(*ssa.FieldAddr); ok {
-				if _, ok := fieldAddrs[addr]; ok {
-					return false
-				}
-			}
+		store, ok := instr.(*ssa.Store)
+		if !ok {
+			continue
+		}
+		addr, ok := store.Addr.(*ssa.FieldAddr)
+		if !ok {
+			continue
+		}
+		if _, ok := fieldAddrs[addr]; ok {
+			return false
 		}
 	}
 
@@ -271,21 +301,28 @@ func isZeroAlloc(alloc *ssa.Alloc) bool {
 
 // fieldAddrsOfAlloc returns all the instructions that address a field or
 // sub-field of the struct allocated in alloc.
-func fieldAddrsOfAlloc(alloc *ssa.Alloc) map[*ssa.FieldAddr]struct{} {
-	instrs := alloc.Block().Instrs
+func fieldAddrsOfAlloc(alloc ssa.Value, instrs []ssa.Instruction) map[*ssa.FieldAddr]struct{} {
 	fieldAddrs := make(map[*ssa.FieldAddr]struct{})
 	vals := map[ssa.Value]struct{}{alloc: {}}
+
 	for _, instr := range instrs {
-		if addr, ok := instr.(*ssa.FieldAddr); ok {
-			if _, ok := vals[addr.X]; ok {
-				fieldAddrs[addr] = struct{}{}
-				if _, ok := isStructType(addr.Type()); ok {
-					// if the struct field being addressed is a struct,
-					// track all future addresses to it
-					vals[addr] = struct{}{}
-				}
-			}
+		addr, ok := instr.(*ssa.FieldAddr)
+		if !ok {
+			continue
 		}
+
+		if _, ok := vals[addr.X]; !ok {
+			continue
+		}
+
+		fieldAddrs[addr] = struct{}{}
+		if _, ok := isStructType(addr.Type()); !ok {
+			continue
+		}
+
+		// if the struct field being addressed is a struct,
+		// track all future addresses to it
+		vals[addr] = struct{}{}
 	}
 
 	return fieldAddrs
@@ -294,6 +331,9 @@ func fieldAddrsOfAlloc(alloc *ssa.Alloc) map[*ssa.FieldAddr]struct{} {
 // structTypes contains both the named struct type
 // (e.g., "[...]syntactic/structinit.structTypes") and its
 // underlying struct type (e.g. "struct { strct: [...] }").
+//
+// named can be nil if the struct does not have a named type
+// (i.e., it is anonymous).
 type structTypes struct {
 	strct *types.Struct
 	named *types.Named
@@ -310,10 +350,15 @@ func isStructType(t types.Type) (structTypes, bool) {
 	if ptr, ok := t.Underlying().(*types.Pointer); ok {
 		typ = ptr.Elem()
 	}
+
 	if n, ok := typ.(*types.Named); ok {
 		if s, ok := n.Underlying().(*types.Struct); ok {
 			return structTypes{strct: s, named: n}, true
 		}
+	}
+
+	if s, ok := typ.(*types.Struct); ok {
+		return structTypes{strct: s, named: nil}, true
 	}
 
 	return structTypes{}, false
@@ -329,10 +374,12 @@ type alloced struct {
 }
 
 // allStructAllocs returns all the instructions in fns that can allocate a value.
+// It also returns a map from an allocated underlying struct type to its named type.
 // An allocation instruction is not always explicit:
-// MakeInterface instructions can also "allocate" a value.
-func allStructAllocs(fns map[*ssa.Function]bool, specs []config.StructInitSpec) []alloced {
+// MakeInterface and ChangeType instructions can also "allocate" a value.
+func allStructAllocs(fns map[*ssa.Function]bool, specs []config.StructInitSpec) ([]alloced, map[*types.Struct]*types.Named) {
 	var allocs []alloced
+	structToNamed := make(map[*types.Struct]*types.Named)
 
 	for fn := range fns {
 		lang.IterateInstructions(fn, func(_ int, instr ssa.Instruction) {
@@ -352,39 +399,93 @@ func allStructAllocs(fns map[*ssa.Function]bool, specs []config.StructInitSpec) 
 				}
 			}
 
-			switch instr := instr.(type) {
-			case *ssa.Alloc:
-				typs, ok := isStructType(instr.Type())
-				if !ok {
-					return
-				}
-				allocs = append(allocs, alloced{val: instr, instr: instr, typs: typs})
-
-			case *ssa.MakeInterface:
-				if c, ok := instr.X.(*ssa.Const); ok && c.Value == nil {
-					typs, ok := isStructType(instr.X.Type())
-					if !ok {
-						return
-					}
-					allocs = append(allocs, alloced{val: instr.X, instr: instr, typs: typs})
-				}
-			}
-
-			return
+			allocs = append(allocs, allocedInstr(instr, structToNamed)...)
 		})
+	}
+
+	return allocs, structToNamed
+}
+
+func allocedInstr(instr ssa.Instruction, structToNamed map[*types.Struct]*types.Named) []alloced {
+	var allocs []alloced
+	switch instr := instr.(type) {
+	case *ssa.Alloc:
+		typs, ok := isStructType(instr.Type())
+		if !ok {
+			return nil
+		}
+		if typs.named != nil {
+			structToNamed[typs.strct] = typs.named
+		}
+		allocs = append(allocs, alloced{val: instr, instr: instr, typs: typs})
+
+	case *ssa.MakeInterface:
+		if c, ok := instr.X.(*ssa.Const); ok && c.Value == nil {
+			typs, ok := isStructType(instr.X.Type())
+			if !ok {
+				return nil
+			}
+			if typs.named != nil {
+				structToNamed[typs.strct] = typs.named
+			}
+			allocs = append(allocs, alloced{val: instr.X, instr: instr, typs: typs})
+		}
+
+	case *ssa.ChangeType:
+		// a ChangeType instruction from a struct to another struct
+		// results in two "allocations":
+		//   1. original struct
+		//   2. resulting struct from the instruction
+		valTyps, ok := isStructType(instr.X.Type())
+		if !ok {
+			return nil
+		}
+		changedTyps, ok := isStructType(instr.Type())
+		if !ok {
+			return nil
+		}
+
+		if valTyps.named != nil {
+			structToNamed[valTyps.strct] = valTyps.named
+		}
+		if changedTyps.named != nil {
+			structToNamed[changedTyps.strct] = changedTyps.named
+		}
+
+		allocs = append(allocs, alloced{val: instr.X, instr: instr, typs: valTyps})
+		allocs = append(allocs, alloced{val: instr, instr: instr, typs: changedTyps})
 	}
 
 	return allocs
 }
 
-// matchStructType returns true if named struct type target is either s or one of
+// matchNamedStructType returns true if named struct type target is either s or one of
 // s's fields.
-func matchStructType(s types.Type, target *types.Named) bool {
+func matchNamedStructType(s types.Type, target *types.Named) bool {
 	if s == target {
 		return true
 	}
 
 	if st, ok := s.Underlying().(*types.Struct); ok {
+		for i := 0; i < st.NumFields(); i++ {
+			field := st.Field(i)
+			if matchNamedStructType(field.Type(), target) { // recursive call
+				return true
+			}
+		}
+	}
+
+	return false
+}
+
+// matchStructType returns true if struct type target is either s or one of
+// s's fields.
+func matchStructType(s types.Type, target *types.Struct) bool {
+	if st, ok := s.(*types.Struct); ok {
+		if st == target {
+			return true
+		}
+
 		for i := 0; i < st.NumFields(); i++ {
 			field := st.Field(i)
 			if matchStructType(field.Type(), target) { // recursive call
@@ -424,23 +525,33 @@ type writeToField struct {
 	write       InvalidWrite
 }
 
-func isInvalidWrite(res AnalysisResult, store *ssa.Store, pos token.Position) (writeToField, bool) {
+func isInvalidWrite(res AnalysisResult, structToNamed map[*types.Struct]*types.Named, store *ssa.Store, pos token.Position) (writeToField, bool) {
 	field, ok := store.Addr.(*ssa.FieldAddr)
 	if !ok {
 		return writeToField{}, false
 	}
 
-	structTypes, ok := isStoreToStructPtr(field.X)
+	structTyps, ok := isStructType(field.X.Type())
 	if !ok {
 		return writeToField{}, false
 	}
 
-	infos, ok := res.InitInfos[structTypes.named]
+	named := structTyps.named
+	if named == nil {
+		n, ok := findNamedStruct(structTyps.strct, structToNamed)
+		if !ok {
+			return writeToField{}, false
+		}
+		named = n
+	}
+
+	structTyps.named = named
+	infos, ok := res.InitInfos[named]
 	if !ok {
 		return writeToField{}, false
 	}
 
-	fieldType := structTypes.strct.Field(field.Field)
+	fieldType := named.Underlying().(*types.Struct).Field(field.Field)
 	wantConst, ok := infos.fieldToConst[fieldType]
 	if !ok {
 		// field not in spec
@@ -461,7 +572,7 @@ func isInvalidWrite(res AnalysisResult, store *ssa.Store, pos token.Position) (w
 	}
 
 	return writeToField{
-		structTypes: structTypes,
+		structTypes: structTyps,
 		fieldType:   fieldType,
 		write: InvalidWrite{
 			Got:   gotConst.Value,
@@ -472,16 +583,21 @@ func isInvalidWrite(res AnalysisResult, store *ssa.Store, pos token.Position) (w
 	}, true
 }
 
-func isStoreToStructPtr(v ssa.Value) (structTypes, bool) {
-	if ptr, ok := v.Type().(*types.Pointer); ok {
-		if n, ok := ptr.Elem().(*types.Named); ok {
-			if s, ok := n.Underlying().(*types.Struct); ok {
-				return structTypes{strct: s, named: n}, true
-			}
+// findNamedStruct is the only way to reliably get a named struct type from a
+// struct type via structToNamed because two structurally identical
+// *types.Struct values may not be equal (==).
+func findNamedStruct(t *types.Struct, structToNamed map[*types.Struct]*types.Named) (*types.Named, bool) {
+	if n, ok := structToNamed[t]; ok {
+		return n, true
+	}
+
+	for s, n := range structToNamed {
+		if types.Identical(t, s) {
+			return n, true
 		}
 	}
 
-	return structTypes{}, false
+	return nil, false
 }
 
 func findNamedConst(program *ssa.Program, valCi config.CodeIdentifier) (*ssa.NamedConst, bool) {
