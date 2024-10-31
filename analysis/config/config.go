@@ -210,8 +210,10 @@ type SyntacticSpecs struct {
 type StructInitSpec struct {
 	// Struct is the struct type whose initialization should be tracked.
 	Struct CodeIdentifier
-	// FieldsSet represents the fields of Struct that must always be set to a specific value.
+	// FieldsSet is the list of the fields of Struct that must always be set to a specific value.
 	FieldsSet []FieldsSetSpec `yaml:"fields-set" json:"fields-set"`
+	// Filters is the list of values that the analysis does not track.
+	Filters []CodeIdentifier
 }
 
 // FieldsSetSpec contains the code identifiers for the problem of tracking how a
@@ -492,6 +494,7 @@ func Load(filename string, configBytes []byte) (*Config, error) {
 			for j, fSpec := range siSpec.FieldsSet {
 				siSpec.FieldsSet[j].Value = compileRegexes(fSpec.Value)
 			}
+			funcutil.MapInPlace(siSpec.Filters, compileRegexes)
 		}
 	}
 

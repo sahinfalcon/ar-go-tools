@@ -74,7 +74,11 @@ func Run(flags tools.CommonFlags) error {
 				return fmt.Errorf("struct init analysis error: %v", err)
 			}
 
-			logger.Printf("struct init analysis results: %+v\n", res)
+			s, failed := structinit.ReportResults(res)
+			logger.Println(s)
+			if failed {
+				os.Exit(1)
+			}
 		}
 	}
 

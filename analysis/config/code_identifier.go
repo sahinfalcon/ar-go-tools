@@ -205,6 +205,21 @@ func (cid *CodeIdentifier) MatchType(typ types.Type) bool {
 	if typ == nil {
 		return cid.Type == ""
 	}
+	if named, ok := typ.(*types.Named); ok {
+		if named.Obj() != nil && named.Obj().Pkg() != nil {
+			path := named.Obj().Pkg().Path()
+			name := named.Obj().Name()
+			if cid.computedRegexs != nil && cid.computedRegexs.packageRegex != nil && cid.computedRegexs.typeRegex != nil {
+				if cid.computedRegexs.packageRegex.MatchString(path) && cid.computedRegexs.typeRegex.MatchString(name) {
+					// be able to fall back to matching just the type
+					return true
+				}
+			}
+			if cid.Package == path && cid.Const == name {
+				return true
+			}
+		}
+	}
 	if cid.computedRegexs != nil && cid.computedRegexs.typeRegex != nil {
 		return cid.computedRegexs.typeRegex.MatchString(typ.String())
 	}
