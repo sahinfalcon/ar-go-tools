@@ -52,6 +52,10 @@ type CodeIdentifier struct {
 	// Type identifies a specific type, which can be used for example to identify allocation of a given type
 	Type string `xml:"type,attr"`
 
+	// Const identifies a named package-level constant.
+	// The Package field must be set as well.
+	Const string `xml:"const,attr"`
+
 	// Label can be used to store user-defined information about the code identifier.
 	Label string `xml:"label,attr"`
 
@@ -82,6 +86,7 @@ type codeIdentifierRegex struct {
 	fieldRegex      *regexp.Regexp
 	receiverRegex   *regexp.Regexp
 	valueMatchRegex *regexp.Regexp
+	constRegex      *regexp.Regexp
 }
 
 // compileRegexes compiles the strings in the code identifier into regexes. It compiles all identifiers into regexes
@@ -121,6 +126,10 @@ func compileRegexes(cid CodeIdentifier) CodeIdentifier {
 	if err != nil {
 		fmt.Printf("[WARN] failed to compile value match regex %v: %v\n", cid.ValueMatch, err)
 	}
+	constRegex, err := regexp.Compile(cid.Const)
+	if err != nil {
+		fmt.Printf("[WARN] failed to compile const regex %v: %v\n", cid.Const, err)
+	}
 	cid.computedRegexs = &codeIdentifierRegex{
 		contextRegex,
 		packageRegex,
@@ -130,6 +139,7 @@ func compileRegexes(cid CodeIdentifier) CodeIdentifier {
 		fieldRegex,
 		receiverRegex,
 		valueMatchRegex,
+		constRegex,
 	}
 	return cid
 }
@@ -145,6 +155,7 @@ func (cid *CodeIdentifier) equalOnNonEmptyFields(cidRef CodeIdentifier) bool {
 			((cidRef.computedRegexs.packageRegex.MatchString(cid.Interface)) || (cidRef.Interface == "")) &&
 			((cidRef.computedRegexs.methodRegex.MatchString(cid.Method)) || (cidRef.Method == "")) &&
 			((cidRef.computedRegexs.receiverRegex.MatchString(cid.Receiver)) || (cidRef.Receiver == "")) &&
+			((cidRef.computedRegexs.constRegex.MatchString(cid.Const)) || (cidRef.Const == "")) &&
 			((cidRef.computedRegexs.fieldRegex.MatchString(cid.Field)) || (cidRef.Field == "")) &&
 			(cidRef.computedRegexs.typeRegex.MatchString(cid.Type) || cidRef.Type == "") &&
 			(cidRef.computedRegexs.valueMatchRegex.MatchString(cid.ValueMatch) || cidRef.ValueMatch == "") &&
@@ -155,6 +166,7 @@ func (cid *CodeIdentifier) equalOnNonEmptyFields(cidRef CodeIdentifier) bool {
 		((cid.Package == cidRef.Interface) || (cidRef.Interface == "")) &&
 		((cid.Method == cidRef.Method) || (cidRef.Method == "")) &&
 		((cid.Receiver == cidRef.Receiver) || (cidRef.Receiver == "")) &&
+		((cid.Const == cidRef.Const) || (cidRef.Const == "")) &&
 		((cid.Field == cidRef.Field) || (cidRef.Field == "")) &&
 		((cid.Type == cidRef.Type) || (cidRef.Type == "")) &&
 		((cid.ValueMatch == cidRef.ValueMatch) || (cidRef.ValueMatch == "")) &&
@@ -192,6 +204,21 @@ func (cid *CodeIdentifier) MatchType(typ types.Type) bool {
 	}
 	if typ == nil {
 		return cid.Type == ""
+	}
+	if named, ok := typ.(*types.Named); ok {
+		if named.Obj() != nil && named.Obj().Pkg() != nil {
+			path := named.Obj().Pkg().Path()
+			name := named.Obj().Name()
+			if cid.computedRegexs != nil && cid.computedRegexs.packageRegex != nil && cid.computedRegexs.typeRegex != nil {
+				if cid.computedRegexs.packageRegex.MatchString(path) && cid.computedRegexs.typeRegex.MatchString(name) {
+					// be able to fall back to matching just the type
+					return true
+				}
+			}
+			if cid.Package == path && cid.Const == name {
+				return true
+			}
+		}
 	}
 	if cid.computedRegexs != nil && cid.computedRegexs.typeRegex != nil {
 		return cid.computedRegexs.typeRegex.MatchString(typ.String())
@@ -232,4 +259,14 @@ func (cid *CodeIdentifier) MatchInterface(f *ssa.Function) bool {
 	}
 
 	return cid.Package == pkg && cid.Interface == f.Type().String()
+}
+
+// MatchConst matches a named package-level constant to a code identifier.
+func (cid *CodeIdentifier) MatchConst(c *ssa.NamedConst) bool {
+	if cid == nil || c == nil {
+		return false
+	}
+
+	pkg := c.Package().String()
+	return cid.computedRegexs.packageRegex.MatchString(pkg) && cid.computedRegexs.constRegex.MatchString(c.Name())
 }
