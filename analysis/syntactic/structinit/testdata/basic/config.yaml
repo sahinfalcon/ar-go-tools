@@ -1,9 +1,0 @@
-syntactic-problems:
-  - struct-inits:
-    - struct:
-        type: ".*target$"
-      fields-set:
-        - field: "x"
-          value:
-            package: "(basic)|(main)|(command-line-arguments)"
-            const: "^One$"
