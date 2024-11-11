@@ -713,11 +713,12 @@ func ReportResults(res AnalysisResult) (string, bool) {
 			failed = true
 		}
 
-		if len(info.InvalidWrites) == 0 {
-			w.WriteString(fmt.Sprintf("\t%v\n", formatutil.Green("no invalid writes found")))
-		}
 		for field, writes := range info.InvalidWrites {
-			w.WriteString(fmt.Sprintf("\t%s of field %v:\n", formatutil.Red("invalid writes"), field.Name()))
+			s := formatutil.Red("invalid writes")
+			if len(writes) == 0 {
+				s = formatutil.Green("no invalid writes")
+			}
+			w.WriteString(fmt.Sprintf("\t%s to field %v\n", s, field.Name()))
 			for _, write := range writes {
 				w.WriteString(fmt.Sprintf("\t\t%v (got %v, want %v) at %v\n", write.Instr, write.Got, write.Want, write.Pos))
 				failed = true
@@ -726,6 +727,20 @@ func ReportResults(res AnalysisResult) (string, bool) {
 	}
 
 	return w.String(), failed
+}
+
+func noInvalidWrites(info InitInfo) bool {
+	if len(info.InvalidWrites) == 0 {
+		return true
+	}
+
+	for _, writes := range info.InvalidWrites {
+		if len(writes) > 0 {
+			return false
+		}
+	}
+
+	return true
 }
 
 // isFiltered returns true if v is filtered according to spec or is in the standard library.
