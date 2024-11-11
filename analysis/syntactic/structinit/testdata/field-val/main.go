@@ -20,12 +20,12 @@ type target struct {
 	x int
 }
 
-type nested struct {
+type nestedTarget struct {
 	t target
 	x int
 }
 
-type nestedPtr struct {
+type nestedTargetPtr struct {
 	t *target
 	x int
 }
@@ -46,20 +46,20 @@ func testZeroAlloc() {
 	ex3.x = 1
 	fmt.Println(ex3)
 
-	var ex4 nested
-	fmt.Println(ex4) // @ZeroAlloc(nested)
+	var ex4 nestedTarget
+	fmt.Println(ex4) // @ZeroAlloc(nestedTarget)
 
-	var ex5 nestedPtr
+	var ex5 nestedTargetPtr
 	fmt.Println(ex5) // ok
 
-	ex6 := nestedPtr{t: &target{}, x: 1} // @ZeroAlloc(target)
+	ex6 := nestedTargetPtr{t: &target{}, x: 1} // @ZeroAlloc(target)
 	fmt.Println(ex6)
 
-	ex7 := nestedPtr{} // ok
+	ex7 := nestedTargetPtr{} // ok
 	fmt.Println(ex7)
 
-	ex8 := nested{}
-	fmt.Println(ex8) // @ZeroAlloc(nested)
+	ex8 := nestedTarget{}
+	fmt.Println(ex8) // @ZeroAlloc(nestedTarget)
 
 	ex9 := struct{ x int }(target{}) // @ZeroAlloc(target)
 	fmt.Println(ex9)
@@ -78,16 +78,16 @@ func testUntypedConstAlloc() {
 	ex3 := &target{x: -1} // @InvalidWrite(target)
 	fmt.Println(ex3)
 
-	ex4 := nested{t: target{x: 1}} // ok
+	ex4 := nestedTarget{t: target{x: 1}} // ok
 	fmt.Println(ex4)
 
-	ex5 := nestedPtr{t: &target{x: 1}} // ok
+	ex5 := nestedTargetPtr{t: &target{x: 1}} // ok
 	fmt.Println(ex5)
 
-	ex6 := nested{t: target{x: -1}} // @InvalidWrite(target)
+	ex6 := nestedTarget{t: target{x: -1}} // @InvalidWrite(target)
 	fmt.Println(ex6)
 
-	ex7 := nestedPtr{t: &target{x: -1}} // @InvalidWrite(target)
+	ex7 := nestedTargetPtr{t: &target{x: -1}} // @InvalidWrite(target)
 	fmt.Println(ex7)
 
 	ex8 := struct{ x int }(target{x: -1}) // @InvalidWrite(target) // @ZeroAlloc(target) // TODO zero-alloc false positive
@@ -107,16 +107,16 @@ func testTypedConstAlloc() {
 	ex3 := &target{x: -One} // @InvalidWrite(target)
 	fmt.Println(ex3)
 
-	ex4 := nested{t: target{x: One}} // ok
+	ex4 := nestedTarget{t: target{x: One}} // ok
 	fmt.Println(ex4)
 
-	ex5 := nestedPtr{t: &target{x: One}} // ok
+	ex5 := nestedTargetPtr{t: &target{x: One}} // ok
 	fmt.Println(ex5)
 
-	ex6 := nested{t: target{x: -One}} // @InvalidWrite(target)
+	ex6 := nestedTarget{t: target{x: -One}} // @InvalidWrite(target)
 	fmt.Println(ex6)
 
-	ex7 := nestedPtr{t: &target{x: -One}} // @InvalidWrite(target)
+	ex7 := nestedTargetPtr{t: &target{x: -One}} // @InvalidWrite(target)
 	fmt.Println(ex7)
 
 	ex8 := struct{ x int }(target{x: -One}) // @InvalidWrite(target) // @ZeroAlloc(target) // TODO zero-alloc false positive

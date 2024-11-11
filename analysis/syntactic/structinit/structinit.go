@@ -17,7 +17,6 @@ package structinit
 
 import (
 	"fmt"
-	"go/constant"
 	"go/token"
 	"go/types"
 	"strings"
@@ -27,6 +26,7 @@ import (
 	"github.com/awslabs/ar-go-tools/analysis/lang"
 	"github.com/awslabs/ar-go-tools/analysis/summaries"
 	"github.com/awslabs/ar-go-tools/internal/formatutil"
+	"github.com/awslabs/ar-go-tools/internal/funcutil"
 	"golang.org/x/tools/go/packages"
 	"golang.org/x/tools/go/ssa"
 )
@@ -45,9 +45,13 @@ type InitInfo struct {
 	// InvalidWrites is a mapping of the struct field to all the invalid writes
 	// to that field.
 	InvalidWrites map[*types.Var][]InvalidWrite
-	// fieldToConst is a mapping of the struct field to the named const
-	// specifying the value it should be initialized to according to the spec.
-	fieldToConst map[*types.Var]*ssa.NamedConst
+	// fieldExpectedValue is a mapping of the struct field to the concrete value it
+	// should be initialized to according to the spec.
+	//
+	// For now, the value can only be:
+	// - *ssa.NamedConst
+	// - *ssa.Function
+	fieldExpectedValue map[*types.Var]ssa.Value
 }
 
 // ZeroAlloc is an empty (zero) allocation of a struct.
@@ -62,9 +66,9 @@ type ZeroAlloc struct {
 // configured value (Want).
 type InvalidWrite struct {
 	// Got is the value actually written.
-	Got constant.Value
+	Got ssa.Value
 	// Want is the configured value that should have been written.
-	Want constant.Value
+	Want ssa.Value
 	// Instr is the instruction performing the write.
 	Instr ssa.Instruction
 	// Pos is the position of the instruction.
@@ -83,14 +87,19 @@ func Analyze(cfg *config.Config, prog *ssa.Program, pkgs []*packages.Package) (A
 	if len(fns) == 0 {
 		return AnalysisResult{}, fmt.Errorf("no functions found")
 	}
+	specs := structInitSpecs(cfg)
+	for fn := range fns {
+		if funcutil.Exists(specs, func(s config.StructInitSpec) bool { return isFiltered(s, fn) }) {
+			delete(fns, fn)
+		}
+	}
 
 	logger := state.Logger
-	logger.Infof("Analyzing %d reachable functions...\n", len(fns))
+	logger.Infof("Analyzing %d unfiltered reachable functions...\n", len(fns))
 
 	res := AnalysisResult{InitInfos: make(map[*types.Named]InitInfo)}
-	specs := structInitSpecs(cfg)
 
-	allocs, structToNamed := allStructAllocs(fns, specs)
+	allocs, structToNamed := allStructAllocs(fns, program.Fset)
 	infos, err := initInfos(state, allocs, specs)
 	res.InitInfos = infos
 	if err != nil {
@@ -100,20 +109,11 @@ func Analyze(cfg *config.Config, prog *ssa.Program, pkgs []*packages.Package) (A
 
 	for _, alloc := range allocs {
 		if isConfiguredZeroAlloc(res, alloc) {
-			pos := findAllocPosition(program.Fset, alloc.instr)
-			logger.Infof("found zero alloc: %v at %v\n", alloc.instr, pos)
-			named := alloc.typs.named
-			if named == nil {
-				n, ok := findNamedStruct(alloc.typs.strct, structToNamed)
-				if !ok {
-					panic(fmt.Sprintf("struct %v has no named type", alloc.typs.strct))
-				}
-				named = n
-			}
-
-			is := res.InitInfos[named]
-			is.ZeroAllocs = append(is.ZeroAllocs, ZeroAlloc{Alloc: alloc.instr, Pos: pos})
-			res.InitInfos[named] = is
+			logger.Infof("found zero alloc: %v at %v\n", alloc.instr, alloc.pos)
+			za := newZeroAlloc(&alloc, structToNamed)
+			is := res.InitInfos[alloc.typs.named]
+			is.ZeroAllocs = append(is.ZeroAllocs, za)
+			res.InitInfos[alloc.typs.named] = is
 		}
 	}
 
@@ -143,11 +143,25 @@ func Analyze(cfg *config.Config, prog *ssa.Program, pkgs []*packages.Package) (A
 	return res, nil
 }
 
+func newZeroAlloc(alloc *alloced, structToNamed map[*types.Struct]*types.Named) ZeroAlloc {
+	named := alloc.typs.named
+	if named == nil {
+		n, ok := findNamedStruct(alloc.typs.strct, structToNamed)
+		if !ok {
+			panic(fmt.Sprintf("struct %v has no named type", alloc.typs.strct))
+		}
+		named = n
+	}
+	alloc.typs.named = named
+
+	return ZeroAlloc{Alloc: alloc.instr, Pos: alloc.pos}
+}
+
 func debug(logger *config.LogGroup, res AnalysisResult, structToNamed map[*types.Struct]*types.Named) {
 	logger.Debugf("initInfos: %+v\n", res.InitInfos)
 	for _, info := range res.InitInfos {
 		logger.Debugf("fieldToConst:\n")
-		for f, c := range info.fieldToConst {
+		for f, c := range info.fieldExpectedValue {
 			logger.Debugf("\t%v -> %v\n", f, c)
 		}
 	}
@@ -211,7 +225,7 @@ func initInfos(state *dataflow.AnalyzerState, allocs []alloced, specs []config.S
 
 func newInitInfo(spec config.StructInitSpec, structType *types.Struct, state *dataflow.AnalyzerState) (InitInfo, error) {
 	invalidWrites := make(map[*types.Var][]InvalidWrite)
-	fieldToConst := make(map[*types.Var]*ssa.NamedConst)
+	fieldVal := make(map[*types.Var]ssa.Value)
 	for _, fieldSpec := range spec.FieldsSet {
 		var field *types.Var
 		for i := 0; i < structType.NumFields(); i++ {
@@ -230,18 +244,29 @@ func newInitInfo(spec config.StructInitSpec, structType *types.Struct, state *da
 
 		invalidWrites[field] = []InvalidWrite{}
 
-		c, ok := findNamedConst(state.Program, fieldSpec.Value)
-		if !ok {
-			return InitInfo{}, fmt.Errorf("failed to find a named constant %v in spec: %+v", fieldSpec.Value, spec)
+		if fieldSpec.Value.Const != "" {
+			c, ok := findNamedConst(state.Program, fieldSpec.Value)
+			if !ok {
+				return InitInfo{}, fmt.Errorf("failed to find a named constant in the program for %v in spec: %+v", fieldSpec.Value, spec)
+			}
+
+			fieldVal[field] = c.Value
 		}
 
-		fieldToConst[field] = c
+		if fieldSpec.Value.Method != "" {
+			f, ok := findMethod(state.Program, fieldSpec.Value)
+			if !ok {
+				return InitInfo{}, fmt.Errorf("failed to find a function in the program for %v in spec: %+v", fieldSpec.Value, spec)
+			}
+
+			fieldVal[field] = f
+		}
 	}
 
 	return InitInfo{
-		ZeroAllocs:    []ZeroAlloc{},
-		InvalidWrites: invalidWrites,
-		fieldToConst:  fieldToConst,
+		ZeroAllocs:         []ZeroAlloc{},
+		InvalidWrites:      invalidWrites,
+		fieldExpectedValue: fieldVal,
 	}, nil
 }
 
@@ -371,13 +396,14 @@ type alloced struct {
 	val   ssa.Value       // val is the allocated value.
 	typs  structTypes     // typs are the types of val.
 	instr ssa.Instruction // instr is the allocation instruction.
+	pos   token.Position  // pos is the position of the instruction.
 }
 
 // allStructAllocs returns all the instructions in fns that can allocate a value.
 // It also returns a map from an allocated underlying struct type to its named type.
 // An allocation instruction is not always explicit:
 // MakeInterface and ChangeType instructions can also "allocate" a value.
-func allStructAllocs(fns map[*ssa.Function]bool, specs []config.StructInitSpec) ([]alloced, map[*types.Struct]*types.Named) {
+func allStructAllocs(fns map[*ssa.Function]bool, fset *token.FileSet) ([]alloced, map[*types.Struct]*types.Named) {
 	var allocs []alloced
 	structToNamed := make(map[*types.Struct]*types.Named)
 
@@ -386,27 +412,28 @@ func allStructAllocs(fns map[*ssa.Function]bool, specs []config.StructInitSpec) 
 			if instr == nil || instr.Parent() == nil {
 				return
 			}
-			// don't analyze the standard library
-			if summaries.IsStdPackageName(lang.PackageNameFromFunction(instr.Parent())) {
+			if !instrCanAlloc(instr) {
 				return
 			}
 
-			if val, ok := instr.(ssa.Value); ok {
-				for _, spec := range specs {
-					if isFiltered(spec, val) {
-						return
-					}
-				}
-			}
-
-			allocs = append(allocs, allocedInstr(instr, structToNamed)...)
+			pos := findAllocPosition(fset, instr)
+			allocs = append(allocs, allocedInstr(instr, structToNamed, pos)...)
 		})
 	}
 
 	return allocs, structToNamed
 }
 
-func allocedInstr(instr ssa.Instruction, structToNamed map[*types.Struct]*types.Named) []alloced {
+func instrCanAlloc(instr ssa.Instruction) bool {
+	switch instr.(type) {
+	case *ssa.Alloc, *ssa.MakeInterface, *ssa.ChangeType:
+		return true
+	default:
+		return false
+	}
+}
+
+func allocedInstr(instr ssa.Instruction, structToNamed map[*types.Struct]*types.Named, pos token.Position) []alloced {
 	var allocs []alloced
 	switch instr := instr.(type) {
 	case *ssa.Alloc:
@@ -417,7 +444,7 @@ func allocedInstr(instr ssa.Instruction, structToNamed map[*types.Struct]*types.
 		if typs.named != nil {
 			structToNamed[typs.strct] = typs.named
 		}
-		allocs = append(allocs, alloced{val: instr, instr: instr, typs: typs})
+		allocs = append(allocs, alloced{val: instr, instr: instr, typs: typs, pos: pos})
 
 	case *ssa.MakeInterface:
 		if c, ok := instr.X.(*ssa.Const); ok && c.Value == nil {
@@ -428,7 +455,7 @@ func allocedInstr(instr ssa.Instruction, structToNamed map[*types.Struct]*types.
 			if typs.named != nil {
 				structToNamed[typs.strct] = typs.named
 			}
-			allocs = append(allocs, alloced{val: instr.X, instr: instr, typs: typs})
+			allocs = append(allocs, alloced{val: instr.X, instr: instr, typs: typs, pos: pos})
 		}
 
 	case *ssa.ChangeType:
@@ -452,8 +479,8 @@ func allocedInstr(instr ssa.Instruction, structToNamed map[*types.Struct]*types.
 			structToNamed[changedTyps.strct] = changedTyps.named
 		}
 
-		allocs = append(allocs, alloced{val: instr.X, instr: instr, typs: valTyps})
-		allocs = append(allocs, alloced{val: instr, instr: instr, typs: changedTyps})
+		allocs = append(allocs, alloced{val: instr.X, instr: instr, typs: valTyps, pos: pos})
+		allocs = append(allocs, alloced{val: instr, instr: instr, typs: changedTyps, pos: pos})
 	}
 
 	return allocs
@@ -506,17 +533,30 @@ func findAllocPosition(fset *token.FileSet, instr ssa.Instruction) token.Positio
 		return fset.Position(instr.Pos())
 	}
 
-	if mk, ok := instr.(*ssa.MakeInterface); ok {
-		for _, ref := range *mk.Referrers() {
+	switch instr := instr.(type) {
+	case *ssa.MakeInterface:
+		for _, ref := range *instr.Referrers() {
 			if s, ok := ref.(*ssa.Store); ok {
-				if s.Val == mk && s.Pos().IsValid() {
+				if s.Val == instr && s.Pos().IsValid() {
 					return fset.Position(s.Pos())
 				}
 			}
 		}
+	case *ssa.ChangeType:
+		for _, ref := range *instr.Referrers() {
+			if s, ok := ref.(*ssa.Store); ok {
+				if s.Val == instr && s.Pos().IsValid() {
+					return fset.Position(s.Pos())
+				}
+			}
+		}
+	default:
+		panic(fmt.Errorf("invalid instruction type: %T", instr))
 	}
 
-	panic(fmt.Errorf("invalid instruction type: %T", instr))
+	// TODO should this be an error?
+	// panic(fmt.Errorf("no valid position found for instruction: %v in function %v", instr, instr.Parent()))
+	return token.Position{}
 }
 
 type writeToField struct {
@@ -552,22 +592,18 @@ func isInvalidWrite(res AnalysisResult, structToNamed map[*types.Struct]*types.N
 	}
 
 	fieldType := named.Underlying().(*types.Struct).Field(field.Field)
-	wantConst, ok := infos.fieldToConst[fieldType]
+	wantVal, ok := infos.fieldExpectedValue[fieldType]
 	if !ok {
 		// field not in spec
 		return writeToField{}, false
 	}
 
-	gotConst, ok := store.Val.(*ssa.Const)
-	if !ok {
-		return writeToField{}, false
+	gotVal := store.Val
+	eql, err := valsEqual(gotVal, wantVal)
+	if err != nil {
+		panic(fmt.Errorf("unexpected store instruction %v to field %v at %v: %v", store, field, pos, err))
 	}
-
-	if gotConst == nil || gotConst.Value == nil {
-		panic(fmt.Errorf("unexpected nil constant %+v in store instruction to field %v: %v", gotConst, field, store))
-	}
-	// compare the underlying constant values
-	if gotConst.Value == wantConst.Value.Value {
+	if eql {
 		return writeToField{}, false
 	}
 
@@ -575,12 +611,42 @@ func isInvalidWrite(res AnalysisResult, structToNamed map[*types.Struct]*types.N
 		structTypes: structTyps,
 		fieldType:   fieldType,
 		write: InvalidWrite{
-			Got:   gotConst.Value,
-			Want:  wantConst.Value.Value,
+			Got:   gotVal,
+			Want:  wantVal,
 			Instr: store,
 			Pos:   pos,
 		},
 	}, true
+}
+
+func valsEqual(gotVal ssa.Value, wantVal ssa.Value) (bool, error) {
+	switch gotVal := gotVal.(type) {
+	case *ssa.Const:
+		switch wantVal := wantVal.(type) {
+		case *ssa.Const:
+			// compare the underlying constant values
+			if gotVal.Value == wantVal.Value {
+				return true, nil
+			}
+		case *ssa.Function:
+			// if the expected function value is nil, this is a valid write
+			if gotVal == nil && wantVal == nil {
+				return true, nil
+			}
+		default:
+			return false, fmt.Errorf("expected value type mismatch: want *ssa.Const or *ssa.Function, got %T", wantVal)
+		}
+	case *ssa.Function:
+		wantFunc, ok := wantVal.(*ssa.Function)
+		if !ok {
+			return false, fmt.Errorf("expected value type mismatch: want *ssa.Function, got %T", wantVal)
+		}
+		if gotVal == wantFunc {
+			return true, nil
+		}
+	}
+
+	return false, nil
 }
 
 // findNamedStruct is the only way to reliably get a named struct type from a
@@ -615,6 +681,21 @@ func findNamedConst(program *ssa.Program, valCi config.CodeIdentifier) (*ssa.Nam
 	return nil, false
 }
 
+func findMethod(program *ssa.Program, valCi config.CodeIdentifier) (*ssa.Function, bool) {
+	pkgs := program.AllPackages()
+	for _, pkg := range pkgs {
+		for _, mem := range pkg.Members {
+			if f, ok := mem.(*ssa.Function); ok {
+				if valCi.MatchPackageAndMethod(f) && f != nil {
+					return f, true
+				}
+			}
+		}
+	}
+
+	return nil, false
+}
+
 // ReportResults writes res to a string and returns true if the analysis should fail.
 func ReportResults(res AnalysisResult) (string, bool) {
 	failed := false
@@ -632,11 +713,12 @@ func ReportResults(res AnalysisResult) (string, bool) {
 			failed = true
 		}
 
-		if len(info.InvalidWrites) == 0 {
-			w.WriteString(fmt.Sprintf("\t%v\n", formatutil.Green("no invalid writes found")))
-		}
 		for field, writes := range info.InvalidWrites {
-			w.WriteString(fmt.Sprintf("\t%s of field %v:\n", formatutil.Red("invalid writes"), field.Name()))
+			s := formatutil.Red("invalid writes")
+			if len(writes) == 0 {
+				s = formatutil.Green("no invalid writes")
+			}
+			w.WriteString(fmt.Sprintf("\t%s to field %v\n", s, field.Name()))
 			for _, write := range writes {
 				w.WriteString(fmt.Sprintf("\t\t%v (got %v, want %v) at %v\n", write.Instr, write.Got, write.Want, write.Pos))
 				failed = true
@@ -647,17 +729,39 @@ func ReportResults(res AnalysisResult) (string, bool) {
 	return w.String(), failed
 }
 
-// isFiltered returns true if v is filtered according to spec.
-func isFiltered(spec config.StructInitSpec, v ssa.Value) bool {
+func noInvalidWrites(info InitInfo) bool {
+	if len(info.InvalidWrites) == 0 {
+		return true
+	}
+
+	for _, writes := range info.InvalidWrites {
+		if len(writes) > 0 {
+			return false
+		}
+	}
+
+	return true
+}
+
+// isFiltered returns true if v is filtered according to spec or is in the standard library.
+func isFiltered(spec config.StructInitSpec, f *ssa.Function) bool {
+	if f == nil {
+		return true
+	}
+
+	// don't analyze the standard library
+	if summaries.IsStdPackageName(lang.PackageNameFromFunction(f)) {
+		return true
+	}
+
 	for _, filter := range spec.Filters {
 		if filter.Type != "" {
-			if filter.MatchType(v.Type()) {
+			if filter.MatchType(f.Type()) {
 				return true
 			}
 		}
 
-		f := v.Parent()
-		if f != nil && filter.Method != "" && filter.Package != "" {
+		if filter.Method != "" && filter.Package != "" {
 			if filter.MatchPackageAndMethod(f) {
 				return true
 			}
