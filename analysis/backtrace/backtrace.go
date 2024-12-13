@@ -48,6 +48,9 @@ type AnalysisReqs struct {
 	Tag string
 }
 
+// ErrMaxDepth is the error when the max depth is exceeded.
+var ErrMaxDepth = errors.New("configured max depth exceeded")
+
 // Analyze runs the analysis on the program prog with the user-provided configuration config.
 // If the analysis run successfully, an AnalysisResult is returned, containing all the information collected.
 //
@@ -92,6 +95,8 @@ func Analyze(state *df.State, reqs AnalysisReqs) (AnalysisResult, error) {
 		// Overriding options with problem-specific config
 		if ps.AnalysisProblemOptions != nil {
 			config.OverrideWithAnalysisOptions(state.Logger, state.Config, ps.AnalysisProblemOptions)
+		} else {
+			ps.AnalysisProblemOptions = &config.AnalysisProblemOptions{}
 		}
 
 		visitor := &Visitor{
@@ -266,6 +271,15 @@ func (v *Visitor) visit(s *df.State, entrypoint *df.CallNodeArg) error {
 
 			logger.Tracef("Base case reached...")
 			logger.Tracef("Adding trace: %v\n", t)
+			continue
+		}
+
+		if s.Config.ExceedsMaxDepth(cur.Depth) {
+			t := findTrace(s, cur)
+			addTrace(v, entrypoint, t)
+			err := fmt.Errorf("call trace %w: %d", ErrMaxDepth, cur.Depth)
+			s.Report.AddError("max-depth", err)
+			logger.Errorf("%v\n", err)
 			continue
 		}
 
@@ -774,9 +788,9 @@ func (v *Visitor) addNext(s *df.State,
 		}
 	}
 
-	// First set of stop conditions: node has already been seen, or depth exceeds limit
+	// First stop condition: node has already been seen
 	key := nextVisitorNode.Key()
-	if seen[key] || s.Config.ExceedsMaxDepth(cur.Depth) {
+	if seen[key] {
 		s.Logger.Tracef("Will not add %v\n", nextNodeWithTrace.Node.String())
 		s.Logger.Tracef("\tseen? %v, depth %v\n", seen[key], cur.Depth)
 		return stack, false

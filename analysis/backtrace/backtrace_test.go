@@ -16,6 +16,7 @@ package backtrace_test
 
 import (
 	"embed"
+	"errors"
 	"fmt"
 	"path/filepath"
 	"strings"
@@ -40,7 +41,7 @@ func TestAnalyze(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	setupConfig(lp.Config, false)
+	setupConfig(lp, false)
 	testAnalyze(t, lp)
 
 	// TODO fix the false positives
@@ -64,8 +65,49 @@ func TestAnalyze_OnDemand(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	setupConfig(lp.Config, true)
+	setupConfig(lp, true)
 	testAnalyze(t, lp)
+}
+
+// TestAnalyze_MaxDepth tests that the unsafe-max-depth config option results in
+// an error if the max depth is exceeded while computing a trace.
+func TestAnalyze_MaxDepth(t *testing.T) {
+	dir := filepath.Join("./testdata", "max-depth")
+	lp, err := analysistest.LoadTest(testfsys, dir, []string{}, analysistest.LoadTestOptions{ApplyRewrite: true}).Value()
+	if err != nil {
+		t.Fatal(err)
+	}
+	setupConfig(lp, true)
+
+	state, err := result.Bind(ptr.NewState(lp), dataflow.NewState).Value()
+	if err != nil {
+		t.Fatalf("failed to load state: %s", err)
+	}
+	backtrace.Analyze(state, backtrace.AnalysisReqs{})
+
+	errMap := state.Report.Errors.ErrorMap
+	if len(errMap) != 1 {
+		t.Fatalf("expected only one error type, got: %v", errMap)
+	}
+
+	found := false
+	for key, errs := range errMap {
+		if len(errs) != 1 {
+			t.Errorf("expected only one error for key %v, got %v", key, errs)
+			continue
+		}
+
+		for _, err := range errs {
+			if errors.Is(err, backtrace.ErrMaxDepth) {
+				found = true
+				break
+			}
+		}
+	}
+
+	if !found {
+		t.Fatalf("expected ErrMaxDepth in backtrace errors: %v", errMap)
+	}
 }
 
 var ignoreMatch = match{-1, nil, -1}
@@ -364,7 +406,7 @@ func TestAnalyze_Closures(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	setupConfig(lp.Config, false)
+	setupConfig(lp, false)
 	testAnalyzeClosures(t, lp)
 }
 
@@ -656,11 +698,15 @@ func matchNode(tnode backtrace.TraceNode, m match) (bool, error) {
 
 // The following code is copied from taint_utils_test.go
 
-func setupConfig(cfg *config.Config, summarizeOnDemand bool) {
+func setupConfig(lp *loadprogram.State, summarizeOnDemand bool) {
+	level := config.ErrLevel // change this as needed for debugging
+	lp.Logger.Level = level
+
+	cfg := lp.Config
 	cfg.Options.ReportCoverage = false
 	cfg.Options.ReportPaths = false
 	cfg.Options.ReportSummaries = false
 	cfg.Options.ReportsDir = ""
-	cfg.LogLevel = int(config.ErrLevel) // change this as needed for debugging
+	cfg.LogLevel = int(level)
 	cfg.SummarizeOnDemand = summarizeOnDemand
 }
